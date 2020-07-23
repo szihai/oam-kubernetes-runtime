@@ -31,7 +31,7 @@ func TestComponentHandler(t *testing.T) {
 	fakeAppClient := fake.NewSimpleClientset().AppsV1()
 	var curComp = &v1alpha2.Component{}
 	var instance = ComponentHandler{
-		client: &test.MockClient{
+		Client: &test.MockClient{
 			MockList: test.NewMockListFn(nil, func(obj runtime.Object) error {
 				lists := v1alpha2.ApplicationConfigurationList{
 					Items: []v1alpha2.ApplicationConfiguration{
@@ -59,8 +59,8 @@ func TestComponentHandler(t *testing.T) {
 				return nil
 			}),
 		},
-		appsClient: fakeAppClient,
-		l:          logging.NewLogrLogger(ctrl.Log.WithName("test")),
+		AppsClient: fakeAppClient,
+		Logger:     logging.NewLogrLogger(ctrl.Log.WithName("test")),
 	}
 	comp := &v1alpha2.Component{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "biz", Name: "comp1"},

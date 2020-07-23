@@ -61,6 +61,8 @@ const (
 // Reconcile event reasons.
 const (
 	reasonRenderComponents       = "RenderedComponents"
+	reasonExecutePrehook         = "ExecutePrehook"
+	reasonExecutePosthook        = "ExecutePosthook"
 	reasonApplyComponents        = "AppliedComponents"
 	reasonGGComponent            = "GarbageCollectedComponent"
 	reasonCannotExecutePrehooks  = "CannotExecutePrehooks"
@@ -78,9 +80,9 @@ func Setup(mgr ctrl.Manager, l logging.Logger) error {
 		Named(name).
 		For(&v1alpha2.ApplicationConfiguration{}).
 		Watches(&source.Kind{Type: &v1alpha2.Component{}}, &ComponentHandler{
-			client:     mgr.GetClient(),
-			l:          l,
-			appsClient: clientappv1.NewForConfigOrDie(mgr.GetConfig()),
+			Client:     mgr.GetClient(),
+			Logger:     l,
+			AppsClient: clientappv1.NewForConfigOrDie(mgr.GetConfig()),
 		}).
 		Complete(NewReconciler(mgr,
 			WithLogger(l.WithValues("controller", name)),
@@ -172,9 +174,11 @@ func NewReconciler(m ctrl.Manager, o ...ReconcilerOption) *OAMApplicationReconci
 			client:    resource.NewAPIPatchingApplicator(m.GetClient()),
 			rawClient: m.GetClient(),
 		},
-		gc:     GarbageCollectorFn(eligible),
-		log:    logging.NewNopLogger(),
-		record: event.NewNopRecorder(),
+		gc:        GarbageCollectorFn(eligible),
+		log:       logging.NewNopLogger(),
+		record:    event.NewNopRecorder(),
+		preHooks:  make(map[string]ControllerHooks),
+		postHooks: make(map[string]ControllerHooks),
 	}
 
 	for _, ro := range o {
@@ -190,7 +194,7 @@ func NewReconciler(m ctrl.Manager, o ...ReconcilerOption) *OAMApplicationReconci
 
 // Reconcile an OAM ApplicationConfigurations by rendering and instantiating its
 // Components and Traits.
-func (r *OAMApplicationReconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
+func (r *OAMApplicationReconciler) Reconcile(req reconcile.Request) (result reconcile.Result, returnErr error) {
 	log := r.log.WithValues("request", req)
 	log.Debug("Reconciling")
 
@@ -222,6 +226,34 @@ func (r *OAMApplicationReconciler) Reconcile(req reconcile.Request) (reconcile.R
 			}
 		}
 	}()
+
+	// execute the posthooks at the end no matter what
+	defer func() {
+		for name, hook := range r.postHooks {
+			exeResult, err := hook.Exec(ctx, ac, log)
+			if err != nil {
+				log.Debug("Failed to execute post-hooks", "hook name", name, "error", err, "requeue-after", result.RequeueAfter)
+				r.record.Event(ac, event.Warning(reasonCannotExecutePosthooks, err))
+				ac.SetConditions(v1alpha1.ReconcileError(errors.Wrap(err, errExecutePosthooks)))
+				result = exeResult
+				returnErr = errors.Wrap(r.client.Status().Update(ctx, ac), errUpdateAppConfigStatus)
+				return
+			}
+			r.record.Event(ac, event.Normal(reasonExecutePosthook, "Successfully executed a posthook", "posthook name", name))
+		}
+	}()
+
+	// execute the prehooks
+	for name, hook := range r.preHooks {
+		result, err := hook.Exec(ctx, ac, log)
+		if err != nil {
+			log.Debug("Failed to execute pre-hooks", "hook name", name, "error", err, "requeue-after", result.RequeueAfter)
+			r.record.Event(ac, event.Warning(reasonCannotExecutePrehooks, err))
+			ac.SetConditions(v1alpha1.ReconcileError(errors.Wrap(err, errExecutePrehooks)))
+			return result, errors.Wrap(r.client.Status().Update(ctx, ac), errUpdateAppConfigStatus)
+		}
+		r.record.Event(ac, event.Normal(reasonExecutePrehook, "Successfully executed a prehook", "prehook name ", name))
+	}
 
 	log = log.WithValues("uid", ac.GetUID(), "version", ac.GetResourceVersion())
 
